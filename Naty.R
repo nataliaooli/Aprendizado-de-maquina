@@ -2,17 +2,20 @@
 
 # carregando pacotes ####
 
-pacman::p_load(tidyverse, tidymodels, rsample, ranger, kernlab)
+pacman::p_load(tidyverse, tidymodels, rsample, ranger, kernlab, readxl, glmnet)
 tidymodels_prefer()
 
 # leitura dos dados ####
 
 # dados extraídos do Kaggle no dia 10/02/2025 
-dados <- read.csv(file = "World-happiness-report-updated_2024.csv", 
-                  sep = ",") %>% 
-  select("Life.Ladder", "Social.support", "Healthy.life.expectancy.at.birth",
-           "Freedom.to.make.life.choices", "Perceptions.of.corruption", "Generosity")
+dados <-read_xls(path = "world-happiness-report-2024-final.xls", range = "A1:K144") %>% 
+  select("Ladder score", "Explained by: Social support", "Explained by: Freedom to make life choices",
+         "Explained by: Healthy life expectancy", "Explained by: Generosity", 
+         "Explained by: Perceptions of corruption")
+nomes_colunas <- c("Ladder.score", "Social.support", "Freedom.to.make.life.changes",
+                   "Healthy.life.expectancy", "Generosity", "Perception.of.corruption")
 
+colnames(dados) <- nomes_colunas
 dim(dados)
 
 
@@ -27,8 +30,6 @@ dim(dados)
 names(dados)
 str(dados)
 
-min(dados$Life.Ladder)
-
 # divisão dos dados em treino/validação/teste ####
 set.seed(2025)
 dados_split <- initial_validation_split(dados, prop = c(0.6, 0.2))
@@ -37,22 +38,71 @@ dados_split <- initial_validation_split(dados, prop = c(0.6, 0.2))
 
 dados_split
 
-dados_treino <- training(dados_split)
-dados_val <- validation(dados_split)
-dados_teste <- testing(dados_split)
+dados_treino <- training(dados_split) #treino
+dados_val <- validation(dados_split) # validação
+dados_teste <- testing(dados_split) # teste
 
 # Recipe ####
 dados_treino_recipe <- 
-  recipe(Life.Ladder ~ Social.support + Healthy.life.expectancy.at.birth +
-           Freedom.to.make.life.choices + Perceptions.of.corruption + Generosity,
+  recipe(Ladder.score ~ Social.support + Healthy.life.expectancy +
+           Freedom.to.make.life.changes + Perception.of.corruption + Generosity,
          data = dados_treino) %>%
-  step_impute_mean(Social.support, Healthy.life.expectancy.at.birth, Freedom.to.make.life.choices,
-                   Perceptions.of.corruption, Generosity)
+  step_impute_mean(Social.support, Healthy.life.expectancy, Freedom.to.make.life.changes,
+                   Perception.of.corruption, Generosity)
+
+# Regressão Linear ####
+reg_linear <- 
+  linear_reg() %>% 
+  set_engine("lm")
+
+reg_linear_wflow <- 
+  workflow() %>% 
+  add_model(reg_linear) %>% 
+  add_recipe(dados_treino_recipe)
+
+# ajuste do modelo nos dados de treino
+rl_fit <- fit(reg_linear_wflow, dados_treino)
+
+# conjunto de validação
+rl_val_pred <- predict(rl_fit, dados_val %>% select(-Ladder.score))
+validacao <- bind_cols(dados_val, svm_val_pred)
+
+validacao %>% metrics(truth = Ladder.score, estimate = .pred)
+
+# Medidas de desempenho ####
+
+metricas <- metric_set(rmse, rsq, mae)
+metricas(predito_teste, truth = Ladder.score, estimate = .pred)
+
+# Modelo ridge ####
+# Criar um novo modelo de regressão linear com penalização (ridge)
+modelo_ridge <- 
+  linear_reg(penalty = 0.1, mixture = 1) %>%  # Penalty controla a regularização, mixture=0 indica Ridge
+  set_engine("glmnet")
+
+# Criar workflow
+ridge_wflow <- 
+  workflow() %>%
+  add_model(modelo_ridge)%>% 
+  add_recipe(dados_treino_recipe)
+
+# Treinar o novo modelo no conjunto de treino
+ridge_fit <- fit(ridge_wflow, data = dados_treino)
+
+# Avaliar no conjunto de validação novamente
+ridge_validation <- predict(ridge_fit, new_data = dados_val %>% select(-Ladder.score)) %>%
+  bind_cols(dados_val %>% select(Ladder.score))
+
+ridge_validation %>%
+  metrics(truth = Ladder.score, estimate = .pred)
+
+print(valid_metrics_ridge)
+
 
 
 #Modelo SVM ####
 svm_reg <- 
-  svm_rbf(cost = 1, margin =0.005) %>% 
+  svm_rbf(cost = 1, margin = 0.001)%>% 
   set_mode("regression") %>% 
   set_engine("kernlab")
 
@@ -61,28 +111,31 @@ svm_reg_wflow <-
   add_model(svm_reg) %>% 
   add_recipe(dados_treino_recipe)
 
-# ajuste do modelo
+# ajuste do modelo nos dados de treino
 svm_fit <- fit(svm_reg_wflow, dados_treino)
 
 # conjunto de validação
-svm_val_pred <- predict(svm_fit, dados_val)
+svm_val_pred <- predict(svm_fit, dados_val %>% select(-Ladder.score))
 validacao <- bind_cols(dados_val, svm_val_pred)
 
-validacao %>% metrics(truth = Life.Ladder, estimate = .pred)
+validacao %>% metrics(truth = Ladder.score, estimate = .pred)
+
+# ajuste do modelo
+predito_teste <- predict(svm_fit, dados_teste %>% select(-Ladder.score))
+predito_teste <- bind_cols(predito_teste, dados_teste %>% select(Ladder.score))
+
+ggplot(predito_teste, aes(x = Ladder.score, y = .pred)) + 
+  # Create a diagonal line:
+  geom_abline(lty = 2, color="red") + 
+  geom_point(alpha = 0.5, size = 2, color = "blue") + 
+  labs(y = "Predito - Índice de Felicidade", x = "Índice de Felicidade") +
+  # Scale and size the x- and y-axis uniformly:
+  coord_obs_pred()+ 
+  theme_minimal()
 
 
+# Medidas de desempenho ####
 
+metricas <- metric_set(rmse, rsq, mae)
+metricas(predito_teste, truth = Ladder.score, estimate = .pred)
 
-table(teste.1$Obesidade, pred1)
-
-# svm_models <- workflow_set(list(regressao = dados_receita), list(svm = svm_reg), cross = TRUE)
-# svm_models
-# 
-# 
-# svm_models <- 
-#   svm_models %>% 
-#   workflow_map("fit_resamples", 
-#                # Options to `workflow_map()`: 
-#                seed = 2025, verbose = TRUE,
-#                # Options to `fit_resamples()`: 
-#                resamples = dados_folds, control = keep_pred)
